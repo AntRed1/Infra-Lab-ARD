@@ -1,0 +1,18 @@
+# Copia este archivo a terraform.tfvars y ajusta los valores
+
+location              = "eastus"           # Cambia a la region mas cercana a ti
+resource_group_name   = "rg-minecraft-ard"
+project_name          = "minecraft-ard"
+vm_size               = "Standard_B2ms"    # 2 vCPU, 8 GB RAM — requerido para Pterodactyl
+admin_username        = "localadmin"
+os_disk_size_gb       = 128
+vnet_address_space    = "10.10.0.0/16"
+subnet_address_prefix = "10.10.1.0/24"
+minecraft_port        = 25565
+terraria_port         = 7777
+wings_http_port       = 8080
+wings_sftp_port       = 2022
+timezone              = "America/Santo_Domingo"
+ssh_allowed_ip        = "148.255.202.16"   # Tu IP publica — verifica en https://ifconfig.me
+auto_shutdown_time    = "2300"             # 11:00 PM hora RD
+auto_shutdown_timezone = "SA Western Standard Time"

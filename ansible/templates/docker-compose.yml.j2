@@ -1,0 +1,170 @@
+version: "3.8"
+
+# ─────────────────────────────────────────────────────────────────────
+# Infra-Lab-ARD — Game Server Infrastructure
+#
+# Panel admin:  http://{{ public_ip }}
+# Minecraft:    {{ public_ip }}:25565  (asignado desde el Panel)
+# Terraria:     {{ public_ip }}:7777   (asignado desde el Panel)
+# Wings SFTP:   sftp://{{ public_ip }}:2022
+#
+# Primer arranque: solo panel + mysql + redis
+# Wings se inicia MANUALMENTE tras configurar el nodo en el Panel
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ─────────────────────────────────────────────
+  # Pterodactyl Panel — Interfaz web de administracion
+  # ─────────────────────────────────────────────
+  panel:
+    image: ghcr.io/pterodactyl/panel:latest
+    container_name: pterodactyl_panel
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - panel_var:/app/var/
+      - panel_nginx:/etc/nginx/http.d/
+      - panel_certs:/etc/letsencrypt/
+      - panel_logs:/app/storage/logs/
+    environment:
+      APP_URL: "http://{{ public_ip }}"
+      APP_TIMEZONE: "{{ timezone }}"
+      APP_SERVICE_AUTHOR: "{{ admin_email }}"
+      MAIL_FROM: "{{ admin_email }}"
+      MAIL_DRIVER: "log"
+      APP_ENV: "production"
+      APP_ENVIRONMENT_ONLY: "false"
+      CACHE_DRIVER: "redis"
+      SESSION_DRIVER: "redis"
+      QUEUE_DRIVER: "redis"
+      REDIS_HOST: "redis"
+      DB_HOST: "mysql"
+      DB_PORT: "3306"
+      DB_DATABASE: "panel"
+      DB_USERNAME: "pterodactyl"
+      DB_PASSWORD: "{{ db_password }}"
+    networks:
+      - panel_net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+
+  # ─────────────────────────────────────────────
+  # MySQL — Base de datos del Panel
+  # ─────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: pterodactyl_mysql
+    restart: unless-stopped
+    volumes:
+      - mysql_data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: panel
+      MYSQL_USER: pterodactyl
+      MYSQL_PASSWORD: "{{ db_password }}"
+      MYSQL_ROOT_PASSWORD: "{{ db_root_password }}"
+    networks:
+      - panel_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{{ db_root_password }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+
+  # ─────────────────────────────────────────────
+  # Redis — Cache, sesiones y colas del Panel
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: pterodactyl_redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - panel_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+        reservations:
+          memory: 64m
+
+  # ─────────────────────────────────────────────
+  # Wings — Daemon que crea y gestiona los
+  # contenedores de cada servidor de juego.
+  # USA RED HOST para que los puertos de los
+  # juegos queden expuestos directamente en la VM.
+  #
+  # INICIO MANUAL: correr solo tras crear el nodo
+  # en el Panel y colocar la config en
+  # /etc/pterodactyl/config.yml
+  # Comando: docker compose --profile wings up -d wings
+  # ─────────────────────────────────────────────
+  wings:
+    image: ghcr.io/pterodactyl/wings:latest
+    container_name: pterodactyl_wings
+    profiles: ["wings"]        # No inicia con 'docker compose up' normal
+    restart: unless-stopped
+    network_mode: "host"       # Necesario para exponer puertos de juegos al host
+    tty: true
+    environment:
+      TZ: "{{ timezone }}"
+      WINGS_UID: 988
+      WINGS_GID: 988
+      WINGS_USERNAME: pterodactyl
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/pterodactyl/:/var/lib/pterodactyl/
+      - /etc/pterodactyl/:/etc/pterodactyl/
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+      - /tmp/pterodactyl/:/tmp/pterodactyl/
+      - /var/log/pterodactyl/:/var/log/pterodactyl/
+    cap_add:
+      - sys_admin
+    security_opt:
+      - no-new-privileges=false
+
+volumes:
+  panel_var:
+    driver: local
+  panel_nginx:
+    driver: local
+  panel_certs:
+    driver: local
+  panel_logs:
+    driver: local
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  panel_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

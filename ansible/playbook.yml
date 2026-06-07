@@ -1,0 +1,195 @@
+---
+- name: Configurar servidor de juegos con Pterodactyl
+  hosts: minecraft_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    gameserver_dir: /opt/gameserver
+    timezone: "America/Santo_Domingo"
+    public_ip: "{{ ansible_host }}"
+    admin_email: "anthonyatras@gmail.com"
+    admin_username: "admin"
+    admin_password: "ChangeMe123!"      # CAMBIAR antes de ejecutar
+    db_password: "PterodactylDB2024!"   # CAMBIAR antes de ejecutar
+    db_root_password: "RootDB2024!"     # CAMBIAR antes de ejecutar
+
+  pre_tasks:
+    - name: Esperar a que el servidor este disponible via SSH
+      ansible.builtin.wait_for_connection:
+        delay: 30
+        timeout: 300
+
+    - name: Actualizar cache de apt
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    # ─────────────────────────────────────────
+    # Docker
+    # ─────────────────────────────────────────
+    - name: Instalar dependencias de Docker
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: Agregar clave GPG de Docker
+      ansible.builtin.shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Agregar repositorio de Docker
+      ansible.builtin.shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Instalar Docker CE y Docker Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Habilitar e iniciar Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Agregar localadmin al grupo docker
+      ansible.builtin.user:
+        name: localadmin
+        groups: docker
+        append: true
+
+    # ─────────────────────────────────────────
+    # Directorios de Pterodactyl Wings
+    # ─────────────────────────────────────────
+    - name: Crear directorios requeridos por Wings
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /var/lib/pterodactyl
+        - /etc/pterodactyl
+        - /var/log/pterodactyl
+        - /tmp/pterodactyl
+
+    # ─────────────────────────────────────────
+    # Despliegue del servidor de juegos
+    # ─────────────────────────────────────────
+    - name: Crear directorio del servidor de juegos
+      ansible.builtin.file:
+        path: "{{ gameserver_dir }}"
+        state: directory
+        owner: localadmin
+        group: localadmin
+        mode: "0755"
+
+    - name: Copiar docker-compose.yml al servidor
+      ansible.builtin.template:
+        src: templates/docker-compose.yml.j2
+        dest: "{{ gameserver_dir }}/docker-compose.yml"
+        owner: localadmin
+        group: localadmin
+        mode: "0644"
+
+    # ─────────────────────────────────────────
+    # Servicio systemd
+    # ─────────────────────────────────────────
+    - name: Crear servicio systemd para el servidor de juegos
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/gameserver.service
+        content: |
+          [Unit]
+          Description=Servidor de Juegos ARD (Pterodactyl)
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory={{ gameserver_dir }}
+          ExecStart=/usr/bin/docker compose up -d panel mysql redis
+          ExecStop=/usr/bin/docker compose down
+          User=localadmin
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+
+    - name: Recargar daemon systemd y habilitar servicio
+      ansible.builtin.systemd:
+        name: gameserver
+        enabled: true
+        daemon_reload: true
+        state: started
+
+    # ─────────────────────────────────────────
+    # Setup inicial de Pterodactyl Panel
+    # ─────────────────────────────────────────
+    - name: Esperar a que el Panel responda (max 3 minutos)
+      ansible.builtin.uri:
+        url: "http://localhost/auth/login"
+        status_code: [200, 302]
+      register: panel_check
+      until: panel_check.status in [200, 302]
+      retries: 18
+      delay: 10
+
+    - name: Crear usuario administrador en el Panel
+      ansible.builtin.command: >
+        docker exec pterodactyl_panel
+        php artisan p:user:make
+        --email="{{ admin_email }}"
+        --username="{{ admin_username }}"
+        --name-first=Admin
+        --name-last=ARD
+        --password="{{ admin_password }}"
+        --admin=1
+      register: artisan_result
+      changed_when: "'successfully' in artisan_result.stdout"
+      failed_when:
+        - artisan_result.rc != 0
+        - "'already exists' not in (artisan_result.stdout | lower)"
+        - "'already exists' not in (artisan_result.stderr | lower)"
+
+  post_tasks:
+    - name: Mostrar informacion del despliegue
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════"
+          - "  Pterodactyl Panel desplegado correctamente!"
+          - "════════════════════════════════════════════════════"
+          - "  Panel:    http://{{ ansible_host }}"
+          - "  Usuario:  {{ admin_username }}"
+          - "  Password: {{ admin_password }}"
+          - "════════════════════════════════════════════════════"
+          - "  PROXIMOS PASOS (ver README):"
+          - "  1. Acceder al Panel y cambiar la contraseña"
+          - "  2. Admin -> Locations -> crear ubicacion RD"
+          - "  3. Admin -> Nodes -> crear nodo con IP {{ ansible_host }}"
+          - "  4. Copiar config de Wings al servidor"
+          - "  5. Iniciar Wings:"
+          - "     cd /opt/gameserver && docker compose --profile wings up -d wings"
+          - "  6. Crear servidores Minecraft y Terraria desde el Panel"
+          - "════════════════════════════════════════════════════"
